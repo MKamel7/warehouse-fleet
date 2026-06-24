@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# ROS 2 / colcon build artifacts
+build/
+install/
+log/
+
+# SolidWorks export log
+export.log
+
+# Editor / OS
+*.swp
+*~
+.vscode/
+.DS_Store
