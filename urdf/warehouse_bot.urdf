@@ -1,0 +1,133 @@
+<?xml version="1.0"?>
+<robot name="warehouse_bot">
+  <link name="base_link">
+    <inertial>
+      <origin xyz="-0.0018352 0.01879 0.0015304" rpy="0 0 0" />
+      <mass value="9.407" />
+      <inertia ixx="0.018872" ixy="0.00022521" ixz="9.6344E-05" iyy="0.049055" iyz="3.4243E-05" izz="0.032751" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://warehouse_bot_package/meshes/base_link.STL" />
+      </geometry>
+      <material name=""><color rgba="0.52941 0.54902 0.54902 1" /></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://warehouse_bot_package/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="right_wheel_link">
+    <inertial>
+      <origin xyz="7.4065E-05 -2.3548E-05 0.010725" rpy="0 0 0" />
+      <mass value="0.10053" />
+      <inertia ixx="4.3565E-05" ixy="-5.5889E-10" ixz="2.5455E-07" iyy="4.3564E-05" iyz="-8.093E-08" izz="8.0423E-05" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://warehouse_bot_package/meshes/right_wheel_link.STL" />
+      </geometry>
+      <material name=""><color rgba="0.29804 0.29804 0.29804 1" /></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://warehouse_bot_package/meshes/right_wheel_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="right_wheel_joint" type="continuous">
+    <origin xyz="-0.081593 -0.076359 0.019117" rpy="1.5665 0.60366 3.1388E-05" />
+    <parent link="base_link" />
+    <child link="right_wheel_link" />
+    <axis xyz="-0.0069057 0.0021956 -0.99997" />
+  </joint>
+
+  <link name="left_wheel_link">
+    <inertial>
+      <origin xyz="-7.6093E-05 2.4193E-05 -0.011019" rpy="0 0 0" />
+      <mass value="0.10053" />
+      <inertia ixx="4.3565E-05" ixy="-5.5889E-10" ixz="2.5455E-07" iyy="4.3564E-05" iyz="-8.093E-08" izz="8.0423E-05" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://warehouse_bot_package/meshes/left_wheel_link.STL" />
+      </geometry>
+      <material name=""><color rgba="0.29804 0.29804 0.29804 1" /></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://warehouse_bot_package/meshes/left_wheel_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="left_wheel_joint" type="continuous">
+    <origin xyz="-0.082616 0.071893 0.019443" rpy="1.6124 -1.3647 -0.037354" />
+    <parent link="base_link" />
+    <child link="left_wheel_link" />
+    <axis xyz="0.0069057 -0.0021956 0.99997" />
+  </joint>
+
+  <link name="lidar_link">
+    <inertial>
+      <origin xyz="0.078294 0.048464 0.039704" rpy="0 0 0" />
+      <mass value="0.03424" />
+      <inertia ixx="1.9402E-05" ixy="2.5957E-10" ixz="-1.1822E-07" iyy="1.9403E-05" iyz="3.7587E-08" izz="2.2836E-06" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://warehouse_bot_package/meshes/lidar_link.STL" />
+      </geometry>
+      <material name=""><color rgba="1 1 1 0.65" /></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://warehouse_bot_package/meshes/lidar_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="lidar_joint" type="fixed">
+    <origin xyz="0.0097328 0.038718 3.9147E-05" rpy="1.5708 0 0" />
+    <parent link="base_link" />
+    <child link="lidar_link" />
+    <axis xyz="0.0069057 -0.0021956 0.99997" />
+    <limit lower="0" upper="0" effort="0" velocity="0" />
+  </joint>
+
+  <gazebo>
+    <plugin name="diff_drive" filename="libgazebo_ros_diff_drive.so">
+      <left_joint>left_wheel_joint</left_joint>
+      <right_joint>right_wheel_joint</right_joint>
+      <wheel_separation>0.148</wheel_separation>
+      <wheel_diameter>0.042</wheel_diameter>
+      <max_wheel_torque>20</max_wheel_torque>
+      <max_wheel_acceleration>1.0</max_wheel_acceleration>
+      <command_topic>cmd_vel</command_topic>
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>true</publish_odom_tf>
+      <publish_wheel_tf>true</publish_wheel_tf>
+      <odometry_frame>odom</odometry_frame>
+      <robot_base_frame>base_link</robot_base_frame>
+    </plugin>
+  </gazebo>
+
+  <gazebo>
+    <plugin name="joint_state" filename="libgazebo_ros_joint_state_publisher.so">
+      <joint_name>left_wheel_joint</joint_name>
+      <joint_name>right_wheel_joint</joint_name>
+    </plugin>
+  </gazebo>
+
+</robot>

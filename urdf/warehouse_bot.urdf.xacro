@@ -1,0 +1,311 @@
+<?xml version="1.0"?>
+<robot name="warehouse_bot" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- =====================================================================
+       Parameterized warehouse robot (SolidWorks export, multi-robot ready).
+
+       Args:
+         namespace : ROS namespace for this robot, WITH trailing slash,
+                     e.g. "robot1/". Used by the Gazebo plugins so that all
+                     topics + the TF tree live under /robot1/... . Leave ""
+                     for a single un-namespaced robot.
+
+       Conventions (matches the official Nav2 multi-robot example):
+         * Frame names are NOT prefixed (base_link, odom, scan, ...).
+         * Isolation between robots comes from the namespaced /<ns>/tf topic,
+           not from frame prefixes.
+       ===================================================================== -->
+  <xacro:arg name="namespace" default="" />
+  <xacro:property name="ns" value="$(arg namespace)" />
+
+  <!-- Colour palette: white body, black wheels (RViz materials) -->
+  <material name="wb_white"><color rgba="0.9 0.9 0.9 1.0" /></material>
+  <material name="wb_black"><color rgba="0.05 0.05 0.05 1.0" /></material>
+  <material name="wb_darkgrey"><color rgba="0.2 0.2 0.2 1.0" /></material>
+
+  <!-- ===================== base_link ===================== -->
+  <link name="base_link">
+    <inertial>
+      <!-- COM placed directly over the wheel axle (x=-0.08). The SolidWorks COM
+           (x=-0.0018) sat ~8 cm ahead of the wheels, so the robot tipped
+           forward, LIFTED the rear drive wheels off the ground and froze. With
+           the COM over the axle there is no pitch torque: the wheels stay
+           loaded and the front/rear skids just keep it level. -->
+      <origin xyz="-0.08 0.0 0.0015304" rpy="0 0 0" />
+      <!-- Mass reduced from the SolidWorks value of 9.407 kg (a density-export
+           artifact, absurd for a 20 cm chassis) to a realistic 2.5 kg. The huge
+           mass on tiny wheel contacts made the wheels slip in place. Inertia
+           scaled by the same ~0.266 factor. -->
+      <mass value="2.5" />
+      <inertia ixx="0.005016" ixy="5.98E-05" ixz="2.56E-05" iyy="0.013036" iyz="9.1E-06" izz="0.008703" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://warehouse_bot_package/meshes/base_link.STL" />
+      </geometry>
+      <material name="wb_white" />
+    </visual>
+    <!-- Simple box collision (NOT the STL). The chassis STL underside sits at
+         z=-0.021, almost on the floor, and triangulated mesh collisions catch
+         and high-centre the robot. This box is lifted so only the wheels and
+         caster touch the ground. -->
+    <!-- Chassis box, lifted clear of the floor so it never drags. -->
+    <collision name="chassis_box">
+      <origin xyz="-0.0025 -0.002 0.03" rpy="0 0 0" />
+      <geometry>
+        <box size="0.20 0.16 0.05" />
+      </geometry>
+    </collision>
+    <!-- Front + rear skids as flat-bottomed boxes (sphere-plane contacts were
+         being missed by ODE in this model; box face contacts are robust).
+         Bottoms at the wheel-contact level (z = -0.036) -> four coplanar
+         contacts (2 wheels + 2 skids) so the robot rests dead level. base_link
+         friction is low (below) so the skids slide like casters. -->
+    <collision name="front_skid">
+      <origin xyz="0.082 0 -0.0275" rpy="0 0 0" />
+      <geometry><box size="0.05 0.05 0.005" /></geometry>
+    </collision>
+    <collision name="rear_skid">
+      <origin xyz="-0.100 0 -0.0275" rpy="0 0 0" />
+      <geometry><box size="0.05 0.05 0.005" /></geometry>
+    </collision>
+  </link>
+
+  <!-- ===================== right wheel ===================== -->
+  <link name="right_wheel_link">
+    <inertial>
+      <origin xyz="7.4065E-05 -2.3548E-05 0.010725" rpy="0 0 0" />
+      <mass value="0.10053" />
+      <inertia ixx="4.3565E-05" ixy="-5.5889E-10" ixz="2.5455E-07" iyy="4.3564E-05" iyz="-8.093E-08" izz="8.0423E-05" />
+    </inertial>
+    <!-- Clean cylinder wheel (visual + collision). The SolidWorks wheel mesh
+         sat partly inside the body and rolls badly in ODE; a primitive wheel
+         looks correct and rolls cleanly. Cylinder axis = link Z, which the
+         joint's rpy points along +Y (the spin axis). -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <cylinder radius="0.04" length="0.025" />
+      </geometry>
+      <material name="wb_black" />
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <cylinder radius="0.04" length="0.025" />
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- Clean, symmetric diff-drive kinematics. The SolidWorks export gave the
+       two wheels different tilted orientations (right rpy pitch 0.60 vs left
+       -1.36), so they did not roll. Both wheels are now vertical disks whose
+       spin axis is the robot Y axis: rpy -pi/2 about X turns the mesh's disk
+       plane vertical and points its spin axis (mesh Z) along +Y. -->
+  <joint name="right_wheel_joint" type="continuous">
+    <!-- z lowered 0.019 -> 0.004 so the wheel bottom (centre - 0.04 radius)
+         sits ~1.5 cm below the chassis underside (z=-0.021), giving ground
+         clearance. At the original height the chassis was high-centred and the
+         wheels had no traction. -->
+    <origin xyz="-0.081593 -0.095 0.004" rpy="-1.5708 0 0" />
+    <parent link="base_link" />
+    <child link="right_wheel_link" />
+    <axis xyz="0 0 1" />
+  </joint>
+
+  <!-- ===================== left wheel ===================== -->
+  <link name="left_wheel_link">
+    <inertial>
+      <origin xyz="-7.6093E-05 2.4193E-05 -0.011019" rpy="0 0 0" />
+      <mass value="0.10053" />
+      <inertia ixx="4.3565E-05" ixy="-5.5889E-10" ixz="2.5455E-07" iyy="4.3564E-05" iyz="-8.093E-08" izz="8.0423E-05" />
+    </inertial>
+    <!-- Clean cylinder wheel (see right wheel note). -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <cylinder radius="0.04" length="0.025" />
+      </geometry>
+      <material name="wb_black" />
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <cylinder radius="0.04" length="0.025" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="left_wheel_joint" type="continuous">
+    <origin xyz="-0.082616 0.095 0.004" rpy="-1.5708 0 0" />
+    <parent link="base_link" />
+    <child link="left_wheel_link" />
+    <axis xyz="0 0 1" />
+  </joint>
+
+  <!-- ===================== lidar (visual mesh) ===================== -->
+  <link name="lidar_link">
+    <inertial>
+      <origin xyz="0.078294 0.048464 0.039704" rpy="0 0 0" />
+      <mass value="0.03424" />
+      <inertia ixx="1.9402E-05" ixy="2.5957E-10" ixz="-1.1822E-07" iyy="1.9403E-05" iyz="3.7587E-08" izz="2.2836E-06" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://warehouse_bot_package/meshes/lidar_link.STL" />
+      </geometry>
+      <material name="wb_darkgrey" />
+    </visual>
+    <!-- No collision: the lidar is a sensor mount; a mesh collision here only
+         risks catching the ground/obstacles. -->
+  </link>
+
+  <joint name="lidar_joint" type="fixed">
+    <origin xyz="0.0097328 0.038718 3.9147E-05" rpy="1.5708 0 0" />
+    <parent link="base_link" />
+    <child link="lidar_link" />
+  </joint>
+
+  <!-- A horizontal sensor frame for the laser scanner. The visual lidar_link
+       is tilted 90deg (SolidWorks export), so we add a clean, axis-aligned
+       frame at the top of the lidar to host the ray sensor and emit /scan. -->
+  <link name="base_scan">
+    <inertial>
+      <mass value="0.001" />
+      <inertia ixx="1e-7" ixy="0" ixz="0" iyy="1e-7" iyz="0" izz="1e-7" />
+    </inertial>
+  </link>
+
+  <joint name="base_scan_joint" type="fixed">
+    <!-- Pitch -0.04 rad compensates the chassis' ~1.8 deg nose-down rest pitch,
+         so the laser plane is level (or a hair nose-up) in the world. Without
+         this the forward beams strike the floor at ~3 m, filling the costmap
+         with phantom obstacles and stalling the controller. -->
+    <origin xyz="0.0097 0.039 0.105" rpy="0 -0.04 0" />
+    <parent link="base_link" />
+    <child link="base_scan" />
+  </joint>
+
+  <!-- =====================================================================
+       Gazebo (Classic 11) appearance + sensors + plugins
+       ===================================================================== -->
+
+  <!-- Colours in Gazebo. Low friction on base_link so the front/rear skid
+       collisions slide (they act like frictionless casters). -->
+  <gazebo reference="base_link">
+    <material>Gazebo/White</material>
+    <mu1>0.1</mu1>
+    <mu2>0.1</mu2>
+  </gazebo>
+  <gazebo reference="left_wheel_link">
+    <material>Gazebo/Black</material>
+    <mu1>1.0</mu1>
+    <mu2>1.0</mu2>
+  </gazebo>
+  <gazebo reference="right_wheel_link">
+    <material>Gazebo/Black</material>
+    <mu1>1.0</mu1>
+    <mu2>1.0</mu2>
+  </gazebo>
+  <gazebo reference="lidar_link">
+    <material>Gazebo/DarkGrey</material>
+  </gazebo>
+
+  <!-- 2D laser scanner on base_scan -> /<ns>scan -->
+  <gazebo reference="base_scan">
+    <sensor name="lidar" type="ray">
+      <always_on>true</always_on>
+      <visualize>false</visualize>
+      <update_rate>10</update_rate>
+      <pose>0 0 0 0 0 0</pose>
+      <ray>
+        <scan>
+          <horizontal>
+            <samples>360</samples>
+            <resolution>1.0</resolution>
+            <min_angle>-3.141592</min_angle>
+            <max_angle>3.141592</max_angle>
+          </horizontal>
+        </scan>
+        <range>
+          <min>0.16</min>
+          <max>12.0</max>
+          <resolution>0.015</resolution>
+        </range>
+        <noise>
+          <type>gaussian</type>
+          <mean>0.0</mean>
+          <stddev>0.01</stddev>
+        </noise>
+      </ray>
+      <plugin name="lidar_controller" filename="libgazebo_ros_ray_sensor.so">
+        <ros>
+          <namespace>${ns}</namespace>
+          <remapping>~/out:=scan</remapping>
+        </ros>
+        <output_type>sensor_msgs/LaserScan</output_type>
+        <frame_name>base_scan</frame_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+  <!-- Differential drive.
+       Frames stay unprefixed (odom, base_link); per-robot isolation comes from
+       remapping tf into the namespace (/tf -> /<ns>/tf), which is exactly what
+       Nav2's namespaced bringup expects. Wheel TF is left to robot_state_publisher
+       (fed by the joint_state plugin) to avoid duplicate base_link->wheel TF. -->
+  <gazebo>
+    <plugin name="diff_drive" filename="libgazebo_ros_diff_drive.so">
+      <ros>
+        <namespace>${ns}</namespace>
+        <remapping>/tf:=tf</remapping>
+        <remapping>/tf_static:=tf_static</remapping>
+      </ros>
+      <left_joint>left_wheel_joint</left_joint>
+      <right_joint>right_wheel_joint</right_joint>
+      <wheel_separation>0.190</wheel_separation>
+      <wheel_diameter>0.080</wheel_diameter>
+      <max_wheel_torque>20</max_wheel_torque>
+      <max_wheel_acceleration>4.0</max_wheel_acceleration>
+      <command_topic>cmd_vel</command_topic>
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>true</publish_odom_tf>
+      <publish_wheel_tf>false</publish_wheel_tf>
+      <odometry_topic>odom</odometry_topic>
+      <odometry_frame>odom</odometry_frame>
+      <robot_base_frame>base_link</robot_base_frame>
+    </plugin>
+  </gazebo>
+
+  <!-- Ground-truth pose (map frame) for the convoy/formation controller. Stands
+       in for a fleet-localization source (UWB / mocap / shared map). The leader
+       still navigates with real Nav2 + AMCL; this only feeds formation control. -->
+  <gazebo>
+    <plugin name="p3d_base" filename="libgazebo_ros_p3d.so">
+      <ros>
+        <namespace>${ns}</namespace>
+        <remapping>odom:=ground_truth</remapping>
+      </ros>
+      <body_name>base_link</body_name>
+      <frame_name>map</frame_name>
+      <update_rate>30.0</update_rate>
+      <gaussian_noise>0.0</gaussian_noise>
+    </plugin>
+  </gazebo>
+
+  <!-- Joint states for the wheels -->
+  <gazebo>
+    <plugin name="joint_state" filename="libgazebo_ros_joint_state_publisher.so">
+      <ros>
+        <namespace>${ns}</namespace>
+        <remapping>~/out:=joint_states</remapping>
+      </ros>
+      <update_rate>30</update_rate>
+      <joint_name>left_wheel_joint</joint_name>
+      <joint_name>right_wheel_joint</joint_name>
+    </plugin>
+  </gazebo>
+
+</robot>
