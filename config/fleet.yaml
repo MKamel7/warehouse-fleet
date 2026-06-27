@@ -1,0 +1,84 @@
+# Central config for the warehouse fleet: roster, control tunables, safety
+# distances and stations. Read by every node (wb_common.load_fleet_config) and
+# by the launch files, so adding or removing a robot here scales the whole stack
+# (spawn, Nav2, convoy, coordinator, allocator).
+#
+# Poses are in the world frame, which equals the map frame for this demo.
+# Override the file location at runtime with WAREHOUSE_FLEET_CONFIG=/path.
+
+fleet:
+  # ----- roster: one entry per robot, with its spawn pose ------------
+  robots:
+    - {name: robot1, x: 2.0, y: -1.0, yaw: 0.0}
+    - {name: robot2, x: 2.0, y: -2.5, yaw: 0.0}
+    - {name: robot3, x: 2.0, y: -4.0, yaw: 0.0}
+
+  # ----- convoy demo: leader + ordered followers --------------------
+  # gap = metres to hold behind the leader along its trail. Order matters:
+  # each follower keeps clear of the one before it (first follows leader).
+  convoy:
+    leader: robot1
+    followers:
+      - {name: robot2, gap: 0.9}
+      - {name: robot3, gap: 1.8}
+
+  # ----- shared control gains / limits ------------------------------
+  control:
+    v_max: 0.26          # max linear speed (m/s)
+    w_max: 1.2           # max angular speed (rad/s)
+    kp_yaw: 1.8          # heading error -> angular vel (followers)
+    kp_long: 0.9         # spacing error -> linear vel (followers)
+    lookahead: 0.45      # pure-pursuit look-ahead along the trail (m)
+    trail_min_step: 0.05 # append a breadcrumb every N m of leader travel
+
+  # ----- leader pure-pursuit (own gains; planner-driven) ------------
+  leader:
+    v_max: 0.26
+    w_max: 1.2
+    kp_yaw: 1.6
+    lookahead: 0.5
+    goal_tol: 0.25       # consider the goal reached within this (m)
+    replan_period: 2.0   # seconds between replans while driving
+    stop_dist: 0.45      # hard stop if another robot is this close ahead
+    slow_dist: 0.85      # start slowing for another robot at this distance
+
+  # ----- safety distances -------------------------------------------
+  safety:
+    collision_stop: 0.35 # convoy hard stop vs ANY other robot (m)
+    min_gap: 0.60        # convoy spacing behind the robot directly ahead (m)
+    proximity_warn: 0.60 # coordinator raises a conflict alert under this (m)
+    proximity_clear: 0.90 # ...and clears the conflict once back beyond this (m)
+    obstacle_stop: 0.40  # follower stops for a /scan obstacle this close ahead (m)
+    obstacle_slow: 0.90  # follower starts slowing for a /scan obstacle here (m)
+
+  # ----- stuck detection & recovery (leader + followers) ------------
+  recovery:
+    stuck_window: 4.0    # s of little progress while trying -> "stuck"
+    stuck_dist: 0.08     # movement under this over the window counts as stuck
+    max_attempts: 4      # give up the goal after this many recoveries
+    rotate_speed: 0.7    # rad/s in-place rotation during recovery
+    backup_speed: 0.12   # m/s reverse during recovery (only if rear is clear)
+    recover_time: 1.5    # s per recovery maneuver
+    backup_clear: 0.6    # m: only reverse if no robot is this close behind
+    blocked_time: 3.0    # follower: s blocked by an obstacle -> try to go around
+    sidestep: 0.5        # follower: lateral step (m) taken to go around
+
+  # ----- there-and-back mission (convoy leader) ---------------------
+  # convoy_mission.py drives the leader through these stations in order
+  # (names from 'stations'); the followers come along. loop=true repeats.
+  mission:
+    waypoints: [pick_a, drop_x, home_1]
+    loop: false
+    arrive_tol: 0.35     # consider a waypoint reached within this (m)
+    pause: 1.0           # s to dwell at each waypoint before the next
+
+  # ----- warehouse stations (pick / drop / home), map frame ---------
+  # Used by the task allocator: a task moves a robot pickup -> dropoff.
+  stations:
+    pick_a: {x: -1.5, y: -1.0, yaw: 0.0}
+    pick_b: {x: -3.0, y: -1.0, yaw: 0.0}
+    drop_x: {x: -1.5, y: -4.0, yaw: 3.14159}
+    drop_y: {x: -3.0, y: -4.0, yaw: 3.14159}
+    home_1: {x: 2.0,  y: -1.0, yaw: 0.0}
+    home_2: {x: 2.0,  y: -2.5, yaw: 0.0}
+    home_3: {x: 2.0,  y: -4.0, yaw: 0.0}

@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
-"""
-gt_localization  -  perfect map->odom from Gazebo ground truth
-==============================================================
+"""Publish map->odom for one robot from Gazebo ground truth.
 
-Publishes the  map -> odom  transform for one robot by combining:
-    map  -> base_link   (from the p3d ground-truth plugin, /<ns>/ground_truth)
-    odom -> base_link   (from wheel odometry, /<ns>/odom)
-    =>  map -> odom = (map->base) * (odom->base)^-1
-
-This stands in for AMCL as a reliable localisation source in simulation, so the
-full Nav2 stack (global/local planning, costmaps, obstacle avoidance, control)
-runs on a pose that never diverges. The robot still navigates autonomously; only
-the localisation is idealised. Set namespace via the 'robot' parameter.
-
-Publishes the transform on /<ns>/tf (matching the robot's namespaced TF tree).
+Combines map->base_link (p3d plugin, /<ns>/ground_truth) with odom->base_link
+(wheel odometry, /<ns>/odom) to get map->odom = (map->base) * (odom->base)^-1.
+Used in place of AMCL in simulation so Nav2 runs on a pose that never diverges.
+Set the namespace via the 'robot' parameter; the transform is published on
+/<ns>/tf.
 """
 
 import math
@@ -24,10 +16,7 @@ from nav_msgs.msg import Odometry
 from tf2_msgs.msg import TFMessage
 from geometry_msgs.msg import TransformStamped
 
-
-def yaw_of(q):
-    return math.atan2(2.0 * (q.w * q.z + q.x * q.y),
-                      1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+import wb_common as wb
 
 
 class GtLocalization(Node):
@@ -51,11 +40,15 @@ class GtLocalization(Node):
 
     def _gt_cb(self, msg):
         p = msg.pose.pose
-        self.map_base = (p.position.x, p.position.y, yaw_of(p.orientation))
+        self.map_base = (p.position.x, p.position.y,
+                         wb.yaw_from_quat(p.orientation.x, p.orientation.y,
+                                          p.orientation.z, p.orientation.w))
 
     def _odom_cb(self, msg):
         p = msg.pose.pose
-        self.odom_base = (p.position.x, p.position.y, yaw_of(p.orientation))
+        self.odom_base = (p.position.x, p.position.y,
+                          wb.yaw_from_quat(p.orientation.x, p.orientation.y,
+                                           p.orientation.z, p.orientation.w))
 
     def _broadcast(self):
         if self.map_base is None:

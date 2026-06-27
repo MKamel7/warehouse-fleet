@@ -21,6 +21,7 @@ import os
 import tempfile
 
 import xacro
+import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, ExecuteProcess, GroupAction,
@@ -29,18 +30,18 @@ from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, PushRosNamespace
 
-# --- The fleet ----------------------------------------------------------
-# name, x, y, yaw  (poses are in the world frame == map frame)
-ROBOTS = [
-    {'name': 'robot1', 'x': 2.0, 'y': -1.0, 'yaw': 0.0},
-    {'name': 'robot2', 'x': 2.0, 'y': -2.5, 'yaw': 0.0},
-    {'name': 'robot3', 'x': 2.0, 'y': -4.0, 'yaw': 0.0},
-]
+
+def load_robots(pkg):
+    """Fleet roster (name + spawn pose) from config/fleet.yaml -> scales the
+    whole launch with the config."""
+    with open(os.path.join(pkg, 'config', 'fleet.yaml')) as f:
+        return yaml.safe_load(f)['fleet']['robots']
 
 
 def generate_launch_description():
     pkg = get_package_share_directory('warehouse_bot_package')
     aws = get_package_share_directory('aws_robomaker_small_warehouse_world')
+    robots = load_robots(pkg)
 
     xacro_file = os.path.join(pkg, 'urdf', 'warehouse_bot.urdf.xacro')
     world = os.path.join(aws, 'worlds', 'no_roof_small_warehouse',
@@ -84,7 +85,7 @@ def generate_launch_description():
     urdf_dir = os.path.join(tempfile.gettempdir(), 'warehouse_bot_urdf')
     os.makedirs(urdf_dir, exist_ok=True)
 
-    for i, r in enumerate(ROBOTS):
+    for i, r in enumerate(robots):
         ns = r['name']
         # ROS namespace must NOT have a trailing slash (rclcpp rejects it).
         doc = xacro.process_file(xacro_file, mappings={'namespace': ns})
