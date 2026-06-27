@@ -1,100 +1,87 @@
 #!/usr/bin/env python3
-"""
-fleet_coordinator
-=================
+"""Fleet state plus traffic management over a shared /fleet topic bus.
 
-A minimal demonstration of INTER-ROBOT COMMUNICATION for the 3-robot warehouse
-fleet, using a shared "fleet bus" built from global (un-namespaced) topics.
+Each robot is namespaced, so cooperation uses global /fleet topics:
+    /fleet/status   consolidated pose of every robot (JSON)
+    /fleet/alerts   proximity-conflict events (JSON)
+    /fleet/hold     list of robots told to pause (JSON)
 
-Why this pattern
-----------------
-Each robot lives in its own namespace (/robot1, /robot2, /robot3) so that Nav2,
-TF and the controllers stay isolated. For the robots to *cooperate*, though,
-they need a common channel that sits OUTSIDE those namespaces. The simplest,
-most ROS-native way to do that is a set of shared topics under /fleet:
-
-    /fleet/status     (this node -> everyone)   consolidated pose of every robot
-    /fleet/<robot>/...                           per-robot coordination channels
-
-This node:
-  * subscribes to every robot's /robotN/odom,
-  * republishes a single consolidated snapshot on /fleet/status (JSON), so any
-    robot or dashboard can see the whole fleet from one topic, and
-  * runs a tiny example of *coordination logic*: if two robots come within a
-    safety distance it raises a conflict warning on /fleet/alerts. That is the
-    hook where a real traffic-manager / task-allocator would live.
-
-This is intentionally transport-only + a stub of logic: it shows HOW the robots
-talk, and gives you one obvious place to add WHAT they decide.
-
-Run:
-    ros2 run warehouse_bot_package fleet_coordinator.py
+Poses come from each robot's map-frame /robotN/ground_truth (not /odom, whose
+origin is each robot's own spawn point, so distances there aren't comparable).
+When two robots get too close the lower-priority one (later in the roster) is
+held until they separate; separate warn/clear distances give hysteresis so the
+hold doesn't flap. convoy_controller and task_allocator both obey /fleet/hold.
 """
 
 import json
-import math
 
 import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String
 
-ROBOTS = ['robot1', 'robot2', 'robot3']
-SAFETY_DISTANCE = 0.6   # metres; closer than this -> conflict alert
+import wb_common as wb
 
 
 class FleetCoordinator(Node):
     def __init__(self):
         super().__init__('fleet_coordinator')
-        self._poses = {}    # robot -> (x, y, yaw)
 
-        # Listen to every robot's odometry (each in its own namespace).
-        for name in ROBOTS:
+        cfg = wb.load_fleet_config()
+        self.robots = wb.robot_names(cfg)
+        self.priority = {n: i for i, n in enumerate(self.robots)}  # lower = wins
+        self.WARN = cfg['safety']['proximity_warn']
+        self.CLEAR = cfg['safety']['proximity_clear']
+
+        self._poses = {}    # robot -> (x, y, yaw)  in the map frame
+        self._held = set()  # robots currently told to hold (hysteresis state)
+
+        for name in self.robots:
             self.create_subscription(
-                Odometry, f'/{name}/odom',
-                self._make_odom_cb(name), 10)
+                Odometry, f'/{name}/ground_truth',
+                self._make_pose_cb(name), 10)
 
-        # Shared fleet channels (global, so every robot can read them).
         self._status_pub = self.create_publisher(String, '/fleet/status', 10)
         self._alert_pub = self.create_publisher(String, '/fleet/alerts', 10)
+        self._hold_pub = self.create_publisher(String, '/fleet/hold', 10)
 
-        self.create_timer(0.5, self._broadcast)   # 2 Hz
+        self.create_timer(0.5, self._tick)   # 2 Hz
         self.get_logger().info(
-            f'Fleet coordinator up. Tracking {ROBOTS} on the /fleet bus.')
+            f'Fleet coordinator + traffic manager up. Tracking {self.robots} '
+            f'(warn<{self.WARN} m, clear>{self.CLEAR} m).')
 
-    def _make_odom_cb(self, name):
+    def _make_pose_cb(self, name):
         def cb(msg: Odometry):
             p = msg.pose.pose.position
             q = msg.pose.pose.orientation
-            yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
-                            1.0 - 2.0 * (q.y * q.y + q.z * q.z))
-            self._poses[name] = (p.x, p.y, yaw)
+            self._poses[name] = (p.x, p.y, wb.yaw_from_quat(q.x, q.y, q.z, q.w))
         return cb
 
-    def _broadcast(self):
+    def _tick(self):
         if not self._poses:
             return
 
-        # 1) Publish the consolidated fleet snapshot.
+        # 1) consolidated fleet snapshot
         snapshot = {n: {'x': round(x, 3), 'y': round(y, 3), 'yaw': round(t, 3)}
                     for n, (x, y, t) in self._poses.items()}
         self._status_pub.publish(String(data=json.dumps(snapshot)))
 
-        # 2) Coordination logic: flag pairs that are too close.
-        names = list(self._poses)
-        for i in range(len(names)):
-            for j in range(i + 1, len(names)):
-                a, b = self._poses[names[i]], self._poses[names[j]]
-                d = math.hypot(a[0] - b[0], a[1] - b[1])
-                if d < SAFETY_DISTANCE:
-                    alert = {'type': 'proximity_conflict',
-                             'robots': [names[i], names[j]],
-                             'distance': round(d, 3)}
-                    self._alert_pub.publish(String(data=json.dumps(alert)))
-                    self.get_logger().warn(
-                        f'CONFLICT: {names[i]} and {names[j]} are '
-                        f'{d:.2f} m apart (< {SAFETY_DISTANCE} m). '
-                        f'A traffic manager would slow/reroute one here.')
+        # 2) traffic management with warn/clear hysteresis
+        still_held = wb.conflict_holds(self._poses, self.priority,
+                                       self.WARN, self.CLEAR, self._held)
+        for r in still_held:
+            self._alert_pub.publish(String(data=json.dumps({
+                'type': 'proximity_conflict', 'hold': r})))
+
+        if still_held != self._held:
+            for r in still_held - self._held:
+                self.get_logger().warn(
+                    f'CONFLICT: holding {r} (lower priority) to resolve traffic.')
+            for r in self._held - still_held:
+                self.get_logger().info(f'CLEARED: releasing {r}.')
+            self._held = still_held
+        # publish the current hold set every tick so late subscribers stay in sync
+        self._hold_pub.publish(String(data=json.dumps(sorted(self._held))))
 
 
 def main():

@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """
-LEADER-FOLLOWER CONVOY demo.
+Leader/follower convoy demo.
 
   * Gazebo + AWS warehouse + 3 robots (white body, black wheels)
-  * robot1  = LEADER: full Nav2 stack (Regulated Pure Pursuit) -> drives to a goal
-  * robot2/3 = FOLLOWERS: localization (AMCL) only; a convoy controller drives
-               them along the leader's actual path at fixed spacing
+  * robot1  = LEADER: Nav2 planner + a pure-pursuit driver -> drives to a goal
+  * robot2/3 = FOLLOWERS: no Nav2/AMCL; a convoy controller drives them along
+               the leader's actual path at fixed spacing, from ground-truth pose
   * RViz bound to the leader, showing the shared /convoy/leader_path
 
 Usage:
     ros2 launch warehouse_bot_package convoy.launch.py
-Then give the LEADER a goal (RViz "2D Goal Pose" -> /robot1/goal_pose, or
-`ros2 run warehouse_bot_package fleet_send_goals.py` editing only robot1).
+Then give the LEADER a goal on the /robot1/goal_pose topic (this mode runs only
+the planner, not bt_navigator, so there is no navigate_to_pose action):
+    RViz "2D Goal Pose"  (publishes /robot1/goal_pose), or
+    ros2 topic pub --once /robot1/goal_pose geometry_msgs/PoseStamped \
+      "{header: {frame_id: map}, pose: {position: {x: -1.5, y: -1.0}, \
+        orientation: {w: 1.0}}}"
 The other two will follow.
 """
 
@@ -44,6 +48,8 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='true'),
         DeclareLaunchArgument('rviz', default_value='true'),
         DeclareLaunchArgument('gui', default_value='true'),
+        DeclareLaunchArgument('mission', default_value='false',
+                              description='auto-run the config waypoint tour'),
     ]
 
     # 1) world + 3 robots
@@ -111,4 +117,12 @@ def generate_launch_description():
              remappings=[('/tf', '/robot1/tf'), ('/tf_static', '/robot1/tf_static')],
              output='screen')])
 
-    return LaunchDescription(declare + [sim, leader_nav, convoy, rviz])
+    # 6) Optional: auto-run the there-and-back waypoint tour (mission:=true).
+    #    Starts after the leader stack + convoy are up so the first goal lands.
+    mission = TimerAction(period=24.0, actions=[
+        Node(condition=IfCondition(LaunchConfiguration('mission')),
+             package='warehouse_bot_package', executable='convoy_mission.py',
+             name='convoy_mission', output='screen',
+             parameters=[{'use_sim_time': use_sim_time}])])
+
+    return LaunchDescription(declare + [sim, leader_nav, convoy, rviz, mission])

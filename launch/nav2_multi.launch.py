@@ -12,6 +12,7 @@ or is started alongside this by bringup.launch.py.
 """
 
 import os
+import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription,
@@ -19,13 +20,17 @@ from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription,
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 
-ROBOTS = ['robot1', 'robot2', 'robot3']
+
+def load_robot_names(pkg):
+    with open(os.path.join(pkg, 'config', 'fleet.yaml')) as f:
+        return [r['name'] for r in yaml.safe_load(f)['fleet']['robots']]
 
 
 def generate_launch_description():
     pkg = get_package_share_directory('warehouse_bot_package')
     nav2_bringup = get_package_share_directory('nav2_bringup')
     bringup_launch = os.path.join(nav2_bringup, 'launch', 'bringup_launch.py')
+    robots = load_robot_names(pkg)
 
     map_yaml = os.path.join(pkg, 'maps', 'warehouse_map.yaml')
     use_sim_time = LaunchConfiguration('use_sim_time')
@@ -38,7 +43,7 @@ def generate_launch_description():
     ]
 
     actions = list(declare)
-    for i, ns in enumerate(ROBOTS):
+    for i, ns in enumerate(robots):
         params_file = os.path.join(pkg, 'params', f'nav2_{ns}.yaml')
         stack = GroupAction([
             IncludeLaunchDescription(

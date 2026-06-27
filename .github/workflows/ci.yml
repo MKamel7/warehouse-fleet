@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  # Fast feedback: lint + the ROS-free unit tests, no ROS install needed.
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install deps
+        run: pip install pytest pyyaml flake8
+      - name: Lint (scripts)
+        run: flake8 --max-line-length=100 scripts test
+      - name: Unit tests
+        run: pytest -q test
+
+  # Full colcon build + ament tests inside the ROS 2 Humble image.
+  colcon:
+    runs-on: ubuntu-latest
+    container: ros:humble
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: src/warehouse_bot_package
+      - name: Install rosdep deps
+        shell: bash
+        run: |
+          apt-get update
+          rosdep update
+          rosdep install --from-paths src --ignore-src -r -y || true
+      - name: Build
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          colcon build --packages-select warehouse_bot_package
+      - name: Test
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          colcon test --packages-select warehouse_bot_package
+          colcon test-result --verbose

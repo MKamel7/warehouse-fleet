@@ -1,21 +1,13 @@
 #!/usr/bin/env python3
-"""
-leader_controller  -  drive the leader along a Nav2-planned path
-================================================================
+"""Drive the leader along a Nav2-planned path with pure pursuit.
 
-The leader still gets a REAL globally-planned path from Nav2's planner server
-(A*/NavFn on the warehouse map), but is driven along it by a smooth pure-pursuit
-law instead of the stock controller. The stock RPP/rotation-shim controller
-oscillates on this diff-drive robot at the 180-deg "turn-around" heading; the
-pure-pursuit law (the same one the convoy followers use) arcs onto the path
-cleanly and never sticks at that singularity.
-
-Flow:
-  goal (/<leader>/goal_pose, e.g. RViz "2D Goal Pose")
-    -> ComputePathToPose action (planner)  -> path
-    -> pure-pursuit along the path          -> /<leader>/cmd_vel
-Pose comes from /<leader>/ground_truth. Path is republished on
-/<leader>/plan for RViz.
+Nav2's planner server still computes the global path (ComputePathToPose) on the
+warehouse map; we drive along it with a pure-pursuit law rather than the stock
+controller, which oscillates on this diff-drive robot at the 180-deg turn-around
+heading. Goals arrive on /<leader>/goal_pose, pose on /<leader>/ground_truth,
+and the path is republished on /<leader>/plan for RViz. If the leader stops
+making progress it runs a recovery (rotate or back up, then replan) and gives up
+after a few tries. Config: config/fleet.yaml.
 """
 
 import math
@@ -27,46 +19,34 @@ from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import ComputePathToPose
 
-LEADER = 'robot1'
-OTHERS = ['robot2', 'robot3']    # robots to avoid hitting
-V_MAX = 0.26
-W_MAX = 1.2
-KP_YAW = 1.6
-LOOKAHEAD = 0.5
-GOAL_TOL = 0.25
-REPLAN_PERIOD = 2.0       # seconds between replans while driving
-STOP_DIST = 0.45          # hard stop if another robot is this close ahead
-SLOW_DIST = 0.85          # start slowing at this distance
-
-
-def yaw_of(q):
-    return math.atan2(2.0 * (q.w * q.z + q.x * q.y),
-                      1.0 - 2.0 * (q.y * q.y + q.z * q.z))
-
-
-def norm(a):
-    while a > math.pi:
-        a -= 2 * math.pi
-    while a < -math.pi:
-        a += 2 * math.pi
-    return a
-
-
-def _smooth(pts, passes=3, alpha=0.5):
-    """Moving-average smoothing of a polyline; keeps endpoints fixed."""
-    p = list(pts)
-    for _ in range(passes):
-        q = list(p)
-        for i in range(1, len(p) - 1):
-            q[i] = (p[i][0] + alpha * (p[i - 1][0] + p[i + 1][0] - 2 * p[i][0]),
-                    p[i][1] + alpha * (p[i - 1][1] + p[i + 1][1] - 2 * p[i][1]))
-        p = q
-    return p
+import wb_common as wb
 
 
 class LeaderController(Node):
     def __init__(self):
         super().__init__('leader_controller')
+
+        cfg = wb.load_fleet_config()
+        self.LEADER = cfg['convoy']['leader']
+        self.OTHERS = [n for n in wb.robot_names(cfg) if n != self.LEADER]
+        lc = cfg['leader']
+        self.V_MAX = lc['v_max']
+        self.W_MAX = lc['w_max']
+        self.KP_YAW = lc['kp_yaw']
+        self.LOOKAHEAD = lc['lookahead']
+        self.GOAL_TOL = lc['goal_tol']
+        self.REPLAN_PERIOD = lc['replan_period']
+        self.STOP_DIST = lc['stop_dist']
+        self.SLOW_DIST = lc['slow_dist']
+        rc = cfg['recovery']
+        self.STUCK_WINDOW = rc['stuck_window']
+        self.STUCK_DIST = rc['stuck_dist']
+        self.MAX_ATTEMPTS = rc['max_attempts']
+        self.ROTATE_SPEED = rc['rotate_speed']
+        self.BACKUP_SPEED = rc['backup_speed']
+        self.RECOVER_TIME = rc['recover_time']
+        self.BACKUP_CLEAR = rc['backup_clear']
+
         self.pose = None            # (x, y, yaw)
         self.others = {}            # robot -> (x, y)
         self.goal = None            # (x, y)
@@ -74,29 +54,39 @@ class LeaderController(Node):
         self.idx = 0
         self._planning = False
         self._since_plan = 0.0
+        # stuck-detection / recovery state
+        self._progress_pos = None   # pose at the start of the stuck window
+        self._stuck_t = 0.0         # time accumulated with little progress
+        self._recovering = False
+        self._recover_phase = None  # 'rotate' | 'backup'
+        self._recover_t = 0.0
+        self._attempts = 0
+        self._plan_fails = 0
 
-        self.create_subscription(Odometry, f'/{LEADER}/ground_truth',
+        self.create_subscription(Odometry, f'/{self.LEADER}/ground_truth',
                                  self._odom_cb, 20)
-        for name in OTHERS:
+        for name in self.OTHERS:
             self.create_subscription(
                 Odometry, f'/{name}/ground_truth',
                 self._make_other_cb(name), 20)
-        self.create_subscription(PoseStamped, f'/{LEADER}/goal_pose',
+        self.create_subscription(PoseStamped, f'/{self.LEADER}/goal_pose',
                                  self._goal_cb, 10)
-        self.cmd_pub = self.create_publisher(Twist, f'/{LEADER}/cmd_vel', 10)
-        self.path_pub = self.create_publisher(Path, f'/{LEADER}/plan', 1)
+        self.cmd_pub = self.create_publisher(Twist, f'/{self.LEADER}/cmd_vel', 10)
+        self.path_pub = self.create_publisher(Path, f'/{self.LEADER}/plan', 1)
         self.planner = ActionClient(self, ComputePathToPose,
-                                    f'/{LEADER}/compute_path_to_pose')
+                                    f'/{self.LEADER}/compute_path_to_pose')
 
         self.dt = 0.05
         self.create_timer(self.dt, self._control)
         self.get_logger().info(
-            f'leader_controller up for {LEADER}; send a goal on '
-            f'/{LEADER}/goal_pose (RViz "2D Goal Pose").')
+            f'leader_controller up for {self.LEADER}; send a goal on '
+            f'/{self.LEADER}/goal_pose (RViz "2D Goal Pose").')
 
     def _odom_cb(self, msg):
         p = msg.pose.pose
-        self.pose = (p.position.x, p.position.y, yaw_of(p.orientation))
+        self.pose = (p.position.x, p.position.y,
+                     wb.yaw_from_quat(p.orientation.x, p.orientation.y,
+                                      p.orientation.z, p.orientation.w))
 
     def _make_other_cb(self, name):
         def cb(msg):
@@ -110,14 +100,15 @@ class LeaderController(Node):
         scale = 1.0
         for ox, oy in self.others.values():
             d = math.hypot(ox - x, oy - y)
-            if d > SLOW_DIST:
+            if d > self.SLOW_DIST:
                 continue
-            bearing = norm(math.atan2(oy - y, ox - x) - yaw)
+            bearing = wb.norm_angle(math.atan2(oy - y, ox - x) - yaw)
             if abs(bearing) > math.pi / 3.0:      # only a ~60deg cone ahead
                 continue
-            if d < STOP_DIST:
+            if d < self.STOP_DIST:
                 return 0.0
-            scale = min(scale, (d - STOP_DIST) / (SLOW_DIST - STOP_DIST))
+            scale = min(scale, (d - self.STOP_DIST) /
+                        (self.SLOW_DIST - self.STOP_DIST))
         return scale
 
     def _goal_cb(self, msg: PoseStamped):
@@ -144,37 +135,127 @@ class LeaderController(Node):
         gh = future.result()
         if not gh.accepted:
             self._planning = False
+            self._plan_fails += 1
+            self.get_logger().warn('planner rejected the goal; will retry.')
             return
         gh.get_result_async().add_done_callback(self._plan_done)
 
     def _plan_done(self, future):
         self._planning = False
-        path = future.result().result.path
-        pts = [(p.pose.position.x, p.pose.position.y) for p in path.poses]
+        try:
+            path = future.result().result.path
+        except Exception:                      # planner aborted / no result
+            path = None
+        pts = [(p.pose.position.x, p.pose.position.y)
+               for p in path.poses] if path else []
         if len(pts) >= 2:
-            self.path = _smooth(pts)
+            self.path = wb.smooth_polyline(pts)
             self.idx = 0
+            self._plan_fails = 0
             self.path_pub.publish(path)
+        else:
+            self._plan_fails += 1
+            if self._plan_fails in (1, 5, 15):
+                self.get_logger().warn(
+                    f'no path to goal yet (attempt {self._plan_fails}); '
+                    f'retrying - goal may be blocked or in an obstacle.')
+
+    def _rear_clear(self, x, y, yaw):
+        """True if no other robot is close behind us (safe to reverse)."""
+        for ox, oy in self.others.values():
+            if math.hypot(ox - x, oy - y) > self.BACKUP_CLEAR:
+                continue
+            bearing = wb.norm_angle(math.atan2(oy - y, ox - x) - yaw)
+            if abs(bearing) > 2.0:            # behind us (~115deg+ off the nose)
+                return False
+        return True
+
+    def _start_recovery(self, x, y, yaw):
+        self._recovering = True
+        self._recover_t = 0.0
+        self._attempts += 1
+        self._recover_phase = 'backup' if self._rear_clear(x, y, yaw) else 'rotate'
+        self.get_logger().warn(
+            f'leader stuck - recovery {self._attempts}/{self.MAX_ATTEMPTS} '
+            f'({self._recover_phase}).')
+
+    def _run_recovery(self, x, y, yaw):
+        """Execute the current recovery maneuver; return True while running."""
+        self._recover_t += self.dt
+        cmd = Twist()
+        if self._recover_phase == 'backup':
+            cmd.linear.x = -self.BACKUP_SPEED
+            cmd.angular.z = self.ROTATE_SPEED * 0.5
+        else:                                  # rotate in place to find a way out
+            cmd.angular.z = self.ROTATE_SPEED
+        self.cmd_pub.publish(cmd)
+        if self._recover_t >= self.RECOVER_TIME:
+            self._recovering = False
+            self._stuck_t = 0.0
+            self._progress_pos = (x, y)
+            self._request_plan()               # replan after clearing
+            return False
+        return True
+
+    def _update_stuck(self, x, y):
+        """Accumulate stuck time; return True if we should start recovery."""
+        if self._progress_pos is None:
+            self._progress_pos = (x, y)
+            self._stuck_t = 0.0
+            return False
+        moved = math.hypot(x - self._progress_pos[0], y - self._progress_pos[1])
+        if moved > self.STUCK_DIST:
+            self._progress_pos = (x, y)        # made progress -> reset
+            self._stuck_t = 0.0
+            return False
+        self._stuck_t += self.dt
+        if self._stuck_t >= self.STUCK_WINDOW:
+            self._progress_pos = (x, y)
+            return True
+        return False
 
     def _control(self):
         self._since_plan += self.dt
         if self.pose is None or self.goal is None:
             return
 
-        # reached goal?
-        dgoal = math.hypot(self.goal[0] - self.pose[0], self.goal[1] - self.pose[1])
-        if dgoal < GOAL_TOL:
-            self.cmd_pub.publish(Twist())
-            self.path = []
+        x, y, yaw = self.pose
+
+        # mid-recovery: keep executing the maneuver, ignore normal control
+        if self._recovering:
+            self._run_recovery(x, y, yaw)
             return
 
-        # periodic replans keep the path fresh
-        if not self.path or self._since_plan > REPLAN_PERIOD:
+        # reached goal?
+        dgoal = math.hypot(self.goal[0] - x, self.goal[1] - y)
+        if dgoal < self.GOAL_TOL:
+            self.cmd_pub.publish(Twist())
+            self.path = []
+            self.goal = None      # idle until the next goal (stop re-publishing)
+            self._attempts = 0
+            self._progress_pos = None
+            return
+
+        # stuck? (trying to reach a goal but not moving) -> recover or give up
+        if self._update_stuck(x, y):
+            if self._attempts >= self.MAX_ATTEMPTS:
+                self.get_logger().error(
+                    f'giving up goal {self.goal} after {self._attempts} '
+                    f'recovery attempts; send a new goal.')
+                self.cmd_pub.publish(Twist())
+                self.goal = None
+                self.path = []
+                self._attempts = 0
+                return
+            self._start_recovery(x, y, yaw)
+            return
+
+        # replan faster while blocked; otherwise on the normal period
+        period = 1.0 if self._stuck_t > 1.0 else self.REPLAN_PERIOD
+        if not self.path or self._since_plan > period:
             self._request_plan()
         if not self.path:
             return
-
-        x, y, yaw = self.pose
         # advance index to nearest path point
         best, bestd = self.idx, float('inf')
         for j in range(self.idx, len(self.path)):
@@ -189,17 +270,17 @@ class LeaderController(Node):
         for j in range(self.idx, len(self.path) - 1):
             acc += math.hypot(self.path[j + 1][0] - self.path[j][0],
                               self.path[j + 1][1] - self.path[j][1])
-            if acc >= LOOKAHEAD:
+            if acc >= self.LOOKAHEAD:
                 tx, ty = self.path[j + 1]
                 break
 
-        heading_err = norm(math.atan2(ty - y, tx - x) - yaw)
-        w = max(-W_MAX, min(W_MAX, KP_YAW * heading_err))
-        v = V_MAX * max(0.0, math.cos(heading_err))   # slow down to turn
-        if abs(heading_err) > 1.0:                     # turn in place if way off
+        heading_err = wb.norm_angle(math.atan2(ty - y, tx - x) - yaw)
+        w = max(-self.W_MAX, min(self.W_MAX, self.KP_YAW * heading_err))
+        v = self.V_MAX * max(0.0, math.cos(heading_err))   # slow down to turn
+        if abs(heading_err) > 1.0:                         # turn in place if way off
             v = 0.0
-        v = min(v, V_MAX * dgoal / 0.5)                # ease in near the goal
-        v *= self._avoid_scale(x, y, yaw)              # don't hit other robots
+        v = min(v, self.V_MAX * dgoal / 0.5)               # ease in near the goal
+        v *= self._avoid_scale(x, y, yaw)                  # don't hit other robots
 
         cmd = Twist()
         cmd.linear.x = v

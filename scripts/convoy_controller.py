@@ -1,35 +1,21 @@
 #!/usr/bin/env python3
-"""
-convoy_controller  -  leader/follower formation for the warehouse fleet
-=======================================================================
+"""Leader/follower convoy controller.
 
-ONE leader (robot1) drives autonomously with Nav2. The other robots
-(robot2, robot3) are NOT given their own Nav2 goals; instead they trace the
-exact path the leader actually travelled, each holding a fixed gap behind the
-one in front. Because they replay the leader's collision-free, Nav2-planned
-route, the whole convoy inherits the "best path" the leader found and stays
-clear of obstacles, while a pure-pursuit law gives smooth execution.
+The leader drives with Nav2; the followers trace the leader's travelled path,
+each holding a fixed gap behind the one in front. We record the leader's pose
+as a breadcrumb trail with cumulative arc-length s; follower i targets
+s_target = s_leader - gap_i, using feed-forward speed plus a spacing term for
+distance and pure pursuit for heading. When the leader stops they close up and
+park.
 
-How it works
-------------
-* The leader is localised by its own Nav2/AMCL; followers run AMCL too, so all
-  poses are available in the shared `map` frame on /<robot>/amcl_pose.
-* As the leader moves we append its pose to a breadcrumb TRAIL with cumulative
-  arc-length s.
-* Follower i has a target slot at arc-length  s_target = s_leader - gap_i.
-  - Longitudinal: v = v_leader_feedforward + Kp * (s_target - s_follower)
-    so it matches the leader's speed and closes any spacing error.
-  - Lateral/heading: pure pursuit toward a look-ahead point further along the
-    trail, so the follower stays ON the path instead of cutting corners.
-* When the leader stops (goal reached) the followers close up to their slots
-  and stop -> the convoy parks in formation.
+On top of that: keep clear of the robot ahead (min_gap), hard stop near any
+robot (collision_stop), slow/stop for obstacles seen on the follower's own
+/scan and side-step around persistent ones, and obey fleet holds (/fleet/hold).
 
-Publishes the leader trail on /convoy/leader_path (nav_msgs/Path) for RViz.
-
-Run:
-    ros2 run warehouse_bot_package convoy_controller.py
+Config: config/fleet.yaml. Publishes the trail on /convoy/leader_path.
 """
 
+import json
 import math
 from collections import deque
 
@@ -37,74 +23,104 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist, PoseStamped
 from nav_msgs.msg import Odometry, Path
+from sensor_msgs.msg import LaserScan
+from std_msgs.msg import String
 
-LEADER = 'robot1'
-# follower name -> gap (metres) to keep behind the leader along the trail
-FOLLOWERS = {'robot2': 0.9, 'robot3': 1.8}
-# the robot immediately in front of each follower (for collision/spacing safety)
-AHEAD = {'robot2': 'robot1', 'robot3': 'robot2'}
-MIN_GAP = 0.6          # trail spacing: keep this far behind the robot ahead (m)
-COLLISION_STOP = 0.35  # hard anti-collision stop vs ANY other robot (m)
+import wb_common as wb
+
 YIELD_DIST = 1.5       # start yielding when the leader is this close and incoming
 YIELD_STEP = 0.85      # how far to pull aside out of the leader's way (m)
-
-# control gains / limits
-KP_LONG = 0.9          # spacing error -> linear vel
-KP_YAW = 1.8           # heading error -> angular vel
-V_MAX = 0.26
-W_MAX = 1.2
-LOOKAHEAD = 0.45       # pure-pursuit look-ahead along the trail (m)
-TRAIL_MIN_STEP = 0.05  # append a breadcrumb every 5 cm of leader travel
 GOAL_SETTLE = 0.10     # follower considered "in slot" within 10 cm
 LEADER_STOP_SPEED = 0.03
-
-
-def yaw_of(q):
-    return math.atan2(2.0 * (q.w * q.z + q.x * q.y),
-                      1.0 - 2.0 * (q.y * q.y + q.z * q.z))
-
-
-def norm(a):
-    while a > math.pi:
-        a -= 2 * math.pi
-    while a < -math.pi:
-        a += 2 * math.pi
-    return a
+OBSTACLE_CONE = math.pi / 6.0   # +-30 deg forward sector checked on /scan
 
 
 class Convoy(Node):
     def __init__(self):
         super().__init__('convoy_controller')
 
-        self.pose = {}                 # robot -> (x, y, yaw)
+        cfg = wb.load_fleet_config()
+        self.LEADER = cfg['convoy']['leader']
+        self.FOLLOWERS = wb.convoy_followers(cfg)   # name -> gap
+        self.AHEAD = wb.convoy_ahead(cfg)           # name -> robot in front
+        ctl, saf = cfg['control'], cfg['safety']
+        self.KP_LONG = ctl['kp_long']
+        self.KP_YAW = ctl['kp_yaw']
+        self.V_MAX = ctl['v_max']
+        self.W_MAX = ctl['w_max']
+        self.LOOKAHEAD = ctl['lookahead']
+        self.TRAIL_MIN_STEP = ctl['trail_min_step']
+        self.MIN_GAP = saf['min_gap']
+        self.COLLISION_STOP = saf['collision_stop']
+        self.OBSTACLE_STOP = saf['obstacle_stop']
+        self.OBSTACLE_SLOW = saf['obstacle_slow']
+        rc = cfg['recovery']
+        self.BLOCKED_TIME = rc['blocked_time']
+        self.RECOVER_TIME = rc['recover_time']
+
+        self.pose = {}                   # robot -> (x, y, yaw)
         self.trail = deque(maxlen=4000)  # list of (x, y, s)
-        self.fidx = {f: 0 for f in FOLLOWERS}   # follower index on the trail
+        self.fidx = {f: 0 for f in self.FOLLOWERS}   # follower index on the trail
+        self.obs_dist = {f: float('inf') for f in self.FOLLOWERS}  # /scan dist ahead
+        self.blocked_t = {f: 0.0 for f in self.FOLLOWERS}  # time blocked by obstacle
+        self.ss_active = {f: False for f in self.FOLLOWERS}  # side-stepping now
+        self.ss_t = {f: 0.0 for f in self.FOLLOWERS}        # side-step timer
+        self.ss_dir = {f: 1.0 for f in self.FOLLOWERS}      # which side (alternates)
+        self.held = set()                # robots paused by the traffic manager
         self.leader_speed = 0.0
         self._last_leader_s = 0.0
 
-        # Continuous ground-truth pose (map frame) from each robot's p3d plugin.
-        for name in [LEADER] + list(FOLLOWERS):
+        for name in [self.LEADER] + list(self.FOLLOWERS):
             self.create_subscription(
                 Odometry, f'/{name}/ground_truth',
                 self._make_pose_cb(name), 20)
+        for name in self.FOLLOWERS:
+            self.create_subscription(
+                LaserScan, f'/{name}/scan',
+                self._make_scan_cb(name), 10)
+        self.create_subscription(String, '/fleet/hold', self._hold_cb, 10)
 
         self.cmd_pub = {f: self.create_publisher(Twist, f'/{f}/cmd_vel', 10)
-                        for f in FOLLOWERS}
+                        for f in self.FOLLOWERS}
         self.path_pub = self.create_publisher(Path, '/convoy/leader_path', 1)
 
         self.dt = 0.05
         self.create_timer(self.dt, self._control)
         self.get_logger().info(
-            f'Convoy up. Leader={LEADER}, followers={FOLLOWERS} '
+            f'Convoy up. Leader={self.LEADER}, followers={self.FOLLOWERS} '
             f'(gaps in m). Drive the leader with a Nav2 goal.')
 
     def _make_pose_cb(self, name):
         def cb(msg: Odometry):
             p = msg.pose.pose
-            self.pose[name] = (p.position.x, p.position.y, yaw_of(p.orientation))
-            if name == LEADER:
+            self.pose[name] = (p.position.x, p.position.y,
+                               wb.yaw_from_quat(p.orientation.x, p.orientation.y,
+                                                p.orientation.z, p.orientation.w))
+            if name == self.LEADER:
                 self._extend_trail(p.position.x, p.position.y)
         return cb
+
+    def _make_scan_cb(self, name):
+        def cb(msg: LaserScan):
+            # Closest range within a +-OBSTACLE_CONE forward sector (0 = ahead).
+            n = len(msg.ranges)
+            if n == 0 or msg.angle_increment == 0.0:
+                return
+            closest = float('inf')
+            for i, r in enumerate(msg.ranges):
+                if not math.isfinite(r) or r < msg.range_min:
+                    continue
+                ang = wb.norm_angle(msg.angle_min + i * msg.angle_increment)
+                if abs(ang) <= OBSTACLE_CONE and r < closest:
+                    closest = r
+            self.obs_dist[name] = closest
+        return cb
+
+    def _hold_cb(self, msg: String):
+        try:
+            self.held = set(json.loads(msg.data))
+        except (ValueError, TypeError):
+            self.held = set()
 
     def _extend_trail(self, x, y):
         if not self.trail:
@@ -112,7 +128,14 @@ class Convoy(Node):
             return
         lx, ly, ls = self.trail[-1]
         d = math.hypot(x - lx, y - ly)
-        if d >= TRAIL_MIN_STEP:
+        if d >= self.TRAIL_MIN_STEP:
+            # The trail is a bounded deque: once it is full, the next append
+            # evicts trail[0], shifting every element (and so every follower's
+            # integer index) down by one. Decrement the indices to match, or
+            # they would silently point at the wrong trail point after ~200 m.
+            if len(self.trail) == self.trail.maxlen:
+                for f in self.fidx:
+                    self.fidx[f] = max(0, self.fidx[f] - 1)
             self.trail.append((x, y, ls + d))
 
     def _leader_s(self):
@@ -132,42 +155,58 @@ class Convoy(Node):
                 bestd, best = d, j
         self.fidx[name] = best
 
-    def _point_at_s(self, target_s):
-        """Linear-interpolate a trail point at arc-length target_s."""
-        if not self.trail:
-            return None
-        if target_s <= 0:
-            return self.trail[0][0], self.trail[0][1]
-        for k in range(1, len(self.trail)):
-            if self.trail[k][2] >= target_s:
-                x0, y0, s0 = self.trail[k - 1]
-                x1, y1, s1 = self.trail[k]
-                r = (target_s - s0) / max(s1 - s0, 1e-6)
-                return x0 + r * (x1 - x0), y0 + r * (y1 - y0)
-        return self.trail[-1][0], self.trail[-1][1]
-
     def _yield_if_leader_incoming(self, name, fx, fy, fyaw):
         """If the leader is heading toward this follower, pull perpendicular out
         of its path so it can pass, then return True (skip normal following)."""
-        if LEADER not in self.pose:
+        if self.LEADER not in self.pose:
             return False
-        lx, ly, lyaw = self.pose[LEADER]
+        lx, ly, lyaw = self.pose[self.LEADER]
         d_lead = math.hypot(fx - lx, fy - ly)
         if d_lead > YIELD_DIST:
             return False
         # is this follower in front of the leader (leader driving at it)?
-        rel = norm(math.atan2(fy - ly, fx - lx) - lyaw)
+        rel = wb.norm_angle(math.atan2(fy - ly, fx - lx) - lyaw)
         if abs(rel) > 1.0:
             return False
         # step aside perpendicular to the leader's heading, to the side we're on
         side = 1.0 if rel >= 0 else -1.0
         ah = lyaw + side * (math.pi / 2.0)
         tx, ty = fx + YIELD_STEP * math.cos(ah), fy + YIELD_STEP * math.sin(ah)
-        herr = norm(math.atan2(ty - fy, tx - fx) - fyaw)
+        herr = wb.norm_angle(math.atan2(ty - fy, tx - fx) - fyaw)
         cmd = Twist()
-        cmd.angular.z = max(-W_MAX, min(W_MAX, KP_YAW * herr))
+        cmd.angular.z = max(-self.W_MAX, min(self.W_MAX, self.KP_YAW * herr))
         cmd.linear.x = 0.18 if abs(herr) < 1.0 else 0.0
         self.cmd_pub[name].publish(cmd)
+        return True
+
+    def _collision_block(self, name, fx, fy, fyaw):
+        """True if another robot is within COLLISION_STOP in our forward half."""
+        for other, pose in self.pose.items():
+            if other == name:
+                continue
+            ox, oy, _ = pose
+            if (math.hypot(ox - fx, oy - fy) < self.COLLISION_STOP and
+                    abs(wb.norm_angle(math.atan2(oy - fy, ox - fx) - fyaw))
+                    < math.pi / 2):
+                return True
+        return False
+
+    def _run_sidestep(self, name, fx, fy, fyaw):
+        """Steer aside to get around an obstacle the trail can't account for,
+        then hand back to normal trail-following. Returns True while active."""
+        self.ss_t[name] += self.dt
+        od = self.obs_dist.get(name, float('inf'))
+        cmd = Twist()
+        cmd.angular.z = self.ss_dir[name] * self.W_MAX * 0.6
+        # creep forward only when the way ahead and other robots are clear
+        clear = od >= self.OBSTACLE_STOP and not self._collision_block(
+            name, fx, fy, fyaw)
+        cmd.linear.x = 0.12 if clear else 0.0
+        self.cmd_pub[name].publish(cmd)
+        if self.ss_t[name] >= self.RECOVER_TIME:
+            self.ss_active[name] = False
+            self.blocked_t[name] = 0.0
+            return False
         return True
 
     def _control(self):
@@ -182,10 +221,20 @@ class Convoy(Node):
         if len(self.trail) < 2:
             return
 
-        for name, gap in FOLLOWERS.items():
+        for name, gap in self.FOLLOWERS.items():
             if name not in self.pose:
                 continue
             fx, fy, fyaw = self.pose[name]
+
+            # HOLD: the traffic manager has paused this robot -> stop and wait.
+            if name in self.held:
+                self.cmd_pub[name].publish(Twist())
+                continue
+
+            # GO-AROUND: keep running an in-progress obstacle side-step maneuver.
+            if self.ss_active[name]:
+                self._run_sidestep(name, fx, fy, fyaw)
+                continue
 
             # YIELD: if the leader is driving toward this follower (e.g. heading
             # back through the convoy), step aside so it can pass, then re-form.
@@ -202,45 +251,56 @@ class Convoy(Node):
             s_target = max(0.0, s - gap)
 
             # look-ahead point on the trail, clamped so we never aim past leader
-            look_s = min(s_follower + LOOKAHEAD, s)
-            tgt = self._point_at_s(look_s)
+            look_s = min(s_follower + self.LOOKAHEAD, s)
+            tgt = wb.point_at_arclength(self.trail, look_s)
             if tgt is None:
                 continue
             tx, ty = tgt
 
             # heading control (pure pursuit)
-            heading_err = norm(math.atan2(ty - fy, tx - fx) - fyaw)
-            w = max(-W_MAX, min(W_MAX, KP_YAW * heading_err))
+            heading_err = wb.norm_angle(math.atan2(ty - fy, tx - fx) - fyaw)
+            w = max(-self.W_MAX, min(self.W_MAX, self.KP_YAW * heading_err))
 
             # longitudinal control: feed-forward leader speed + spacing error
             spacing_err = s_target - s_follower
-            v = self.leader_speed + KP_LONG * spacing_err
+            v = self.leader_speed + self.KP_LONG * spacing_err
             if abs(heading_err) > 0.8:
                 v = min(v, 0.05)
-            v = max(0.0, min(V_MAX, v))
+            v = max(0.0, min(self.V_MAX, v))
 
-            # SAFETY: never crowd the robot directly ahead. Scale speed down as
-            # we approach MIN_GAP and stop (or creep) at it. This also stops a
-            # follower from blocking the leader as it settles on its goal.
-            ahead = AHEAD.get(name)
+            # SAFETY: never crowd the robot directly ahead.
+            ahead = self.AHEAD.get(name)
             if ahead in self.pose:
                 ax, ay, _ = self.pose[ahead]
                 d_ahead = math.hypot(ax - fx, ay - fy)
-                if d_ahead < MIN_GAP:
+                if d_ahead < self.MIN_GAP:
                     v = 0.0
-                elif d_ahead < MIN_GAP + 0.4:
-                    v = min(v, V_MAX * (d_ahead - MIN_GAP) / 0.4)
+                elif d_ahead < self.MIN_GAP + 0.4:
+                    v = min(v, self.V_MAX * (d_ahead - self.MIN_GAP) / 0.4)
 
-            # SAFETY 2: hard anti-collision against EVERY other robot. Only
-            # triggers at close range (COLLISION_STOP) so normal ~0.9 m convoy
-            # spacing and re-forming are NOT frozen -> prevents crashes when
-            # paths cross without deadlocking the formation.
-            for other, (ox, oy, _) in self.pose.items():
-                if other == name:
-                    continue
-                d = math.hypot(ox - fx, oy - fy)
-                if d < COLLISION_STOP and abs(norm(math.atan2(oy - fy, ox - fx) - fyaw)) < math.pi / 2:
-                    v = 0.0
+            # SAFETY 2: hard anti-collision against EVERY other robot, close range.
+            if self._collision_block(name, fx, fy, fyaw):
+                v = 0.0
+
+            # SAFETY 3: dynamic obstacle on this robot's own /scan (something the
+            # leader's recorded trail can't know about). Slow as we approach,
+            # stop at OBSTACLE_STOP; if blocked too long, side-step around it.
+            od = self.obs_dist.get(name, float('inf'))
+            if od < self.OBSTACLE_STOP:
+                v = 0.0
+                self.blocked_t[name] += self.dt
+                if self.blocked_t[name] > self.BLOCKED_TIME:
+                    self.ss_active[name] = True
+                    self.ss_t[name] = 0.0
+                    self.ss_dir[name] *= -1.0    # alternate side each attempt
+                    self.get_logger().warn(
+                        f'{name} blocked by an obstacle - going around.')
+            elif od < self.OBSTACLE_SLOW:
+                v = min(v, self.V_MAX * (od - self.OBSTACLE_STOP) /
+                        (self.OBSTACLE_SLOW - self.OBSTACLE_STOP))
+                self.blocked_t[name] = 0.0
+            else:
+                self.blocked_t[name] = 0.0
 
             # park in formation when the leader has stopped and we're in slot
             if self.leader_speed < LEADER_STOP_SPEED and spacing_err < GOAL_SETTLE:
@@ -275,7 +335,6 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        # stop the followers on exit
         for pub in node.cmd_pub.values():
             pub.publish(Twist())
         node.destroy_node()

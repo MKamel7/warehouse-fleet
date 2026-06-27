@@ -1,20 +1,12 @@
 <?xml version="1.0"?>
 <robot name="warehouse_bot" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
-  <!-- =====================================================================
-       Parameterized warehouse robot (SolidWorks export, multi-robot ready).
-
-       Args:
-         namespace : ROS namespace for this robot, WITH trailing slash,
-                     e.g. "robot1/". Used by the Gazebo plugins so that all
-                     topics + the TF tree live under /robot1/... . Leave ""
-                     for a single un-namespaced robot.
-
-       Conventions (matches the official Nav2 multi-robot example):
-         * Frame names are NOT prefixed (base_link, odom, scan, ...).
-         * Isolation between robots comes from the namespaced /<ns>/tf topic,
-           not from frame prefixes.
-       ===================================================================== -->
+  <!-- Parameterized warehouse robot (SolidWorks export, multi-robot ready).
+       Arg 'namespace' is the ROS namespace with a trailing slash, e.g.
+       "robot1/", used by the Gazebo plugins so topics and the TF tree live
+       under /robot1/...; leave "" for a single un-namespaced robot.
+       Frame names are not prefixed; isolation comes from the namespaced
+       /<ns>/tf topic, matching the Nav2 multi-robot example. -->
   <xacro:arg name="namespace" default="" />
   <xacro:property name="ns" value="$(arg namespace)" />
 
@@ -23,7 +15,7 @@
   <material name="wb_black"><color rgba="0.05 0.05 0.05 1.0" /></material>
   <material name="wb_darkgrey"><color rgba="0.2 0.2 0.2 1.0" /></material>
 
-  <!-- ===================== base_link ===================== -->
+  <!-- base_link -->
   <link name="base_link">
     <inertial>
       <!-- COM placed directly over the wheel axle (x=-0.08). The SolidWorks COM
@@ -72,7 +64,7 @@
     </collision>
   </link>
 
-  <!-- ===================== right wheel ===================== -->
+  <!-- right wheel -->
   <link name="right_wheel_link">
     <inertial>
       <origin xyz="7.4065E-05 -2.3548E-05 0.010725" rpy="0 0 0" />
@@ -114,7 +106,7 @@
     <axis xyz="0 0 1" />
   </joint>
 
-  <!-- ===================== left wheel ===================== -->
+  <!-- left wheel -->
   <link name="left_wheel_link">
     <inertial>
       <origin xyz="-7.6093E-05 2.4193E-05 -0.011019" rpy="0 0 0" />
@@ -144,7 +136,7 @@
     <axis xyz="0 0 1" />
   </joint>
 
-  <!-- ===================== lidar (visual mesh) ===================== -->
+  <!-- lidar (visual mesh) -->
   <link name="lidar_link">
     <inertial>
       <origin xyz="0.078294 0.048464 0.039704" rpy="0 0 0" />
@@ -188,9 +180,7 @@
     <child link="base_scan" />
   </joint>
 
-  <!-- =====================================================================
-       Gazebo (Classic 11) appearance + sensors + plugins
-       ===================================================================== -->
+  <!-- Gazebo (Classic 11) appearance, sensors and plugins -->
 
   <!-- Colours in Gazebo. Low friction on base_link so the front/rear skid
        collisions slide (they act like frictionless casters). -->
