@@ -41,6 +41,14 @@ def generate_launch_description():
         DeclareLaunchArgument('autostart', default_value='true'),
         DeclareLaunchArgument('map', default_value=map_yaml),
     ]
+    # Seconds between starting each robot's Nav2 stack. Spacing them out lets
+    # each stack lifecycle-activate before the next starts, avoiding the
+    # "Failed to change state ... get_state service ... async_send_request
+    # failed" races when all stacks configure at once under load. Override with
+    # WAREHOUSE_NAV2_STAGGER if your machine needs more/less. 15 s reliably
+    # brings up all three stacks here; lower it on a faster machine to start
+    # quicker, raise it if a robot's stack still stalls during bringup.
+    stagger = float(os.environ.get('WAREHOUSE_NAV2_STAGGER', '15.0'))
 
     actions = list(declare)
     for i, ns in enumerate(robots):
@@ -61,7 +69,8 @@ def generate_launch_description():
                 }.items(),
             ),
         ])
-        # Stagger nav2 stacks so 3 lifecycle managers don't fight for CPU at t=0.
-        actions.append(TimerAction(period=float(2 * i), actions=[stack]))
+        # Stagger nav2 stacks so the lifecycle managers don't all configure +
+        # activate at the same time (which times out get_state services).
+        actions.append(TimerAction(period=stagger * i, actions=[stack]))
 
     return LaunchDescription(actions)

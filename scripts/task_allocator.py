@@ -37,7 +37,7 @@ class TaskAllocator(Node):
         self.queue = deque()       # pending task dicts
         self._seq = 0              # fallback id counter
 
-        self.clients = {r: ActionClient(self, NavigateToPose,
+        self.nav_clients = {r: ActionClient(self, NavigateToPose,
                                         f'/{r}/navigate_to_pose')
                         for r in self.robots}
 
@@ -107,7 +107,7 @@ class TaskAllocator(Node):
             robot = wb.nearest(cands, (pick['x'], pick['y']))
             if robot is None:
                 return
-            if not self.clients[robot].server_is_ready():
+            if not self.nav_clients[robot].server_is_ready():
                 # Nav2 not up yet for this robot; try again next tick.
                 return
             self.queue.popleft()
@@ -128,7 +128,7 @@ class TaskAllocator(Node):
         p.pose.orientation.z = z
         p.pose.orientation.w = w
         goal.pose = p
-        send = self.clients[robot].send_goal_async(goal)
+        send = self.nav_clients[robot].send_goal_async(goal)
         send.add_done_callback(
             lambda fut, r=robot, ph=phase: self._goal_response(fut, r, ph))
 

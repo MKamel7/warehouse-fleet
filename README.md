@@ -112,7 +112,14 @@ This starts, in order:
 1. Gazebo Classic + the warehouse world,
 2. `robot1/2/3` spawned in the open aisle (x≈2, y = -1 / -2.5 / -4),
 3. one Nav2 stack per robot (localised on the pre-built map, auto initial pose),
+   **started staggered ~15 s apart** so each stack fully lifecycle-activates
+   before the next begins - this avoids a startup race that otherwise leaves the
+   last robot's stack stalled and unable to navigate,
 4. RViz bound to `robot1`.
+
+> **Give it ~50 s** for all three stacks to come up before sending goals. On a
+> fast machine you can shorten the spacing: prefix the launch with
+> `WAREHOUSE_NAV2_STAGGER=8` (seconds between stacks).
 
 Send a goal from RViz with **“2D Goal Pose”** (it publishes to
 `/robot1/goal_pose`), or command the whole fleet at once:
@@ -121,7 +128,9 @@ Send a goal from RViz with **“2D Goal Pose”** (it publishes to
 ros2 run warehouse_bot_package fleet_send_goals.py
 ```
 
-Watch a different robot in its own RViz:
+Watch **and command** a different robot in its own RViz window (one per robot;
+the window's displays show that robot's map/scan/costmap/plan, and its
+"2D Goal Pose" tool sends goals to that robot):
 
 ```bash
 ros2 launch warehouse_bot_package rviz.launch.py namespace:=robot2
