@@ -2,8 +2,7 @@
 
 > **This is university coursework, preserved as submitted.**
 >
-> It was a **group project** (Group 7, Cooperative and Autonomous Systems, SoSe 2026), so the work
-> here is a joint contribution and not solely mine. It is kept public and unchanged because it is a
+> Cooperative and Autonomous Systems, SoSe 2026. It is kept public and unchanged because it is a
 > real piece of work and because the results below are honest, but it is finished and no longer
 > developed.
 >
@@ -13,10 +12,10 @@
 > (`gt_localization.py` plus the `p3d` plugin), not a real estimate, which is why the leader never
 > gets lost.
 >
-> I am building a solo successor from scratch: an intralogistics AMR fleet on ROS 2 Jazzy and
-> Gazebo Harmonic, with a data-sheet grounded robot, real localisation, human detection and
-> tracking, ISO 3691-4 protective fields and a VDA 5050 fleet interface. It shares almost no code
-> with this repository. A link will be added here when it is published.
+> **Superseded by [intralogistics-amr](https://github.com/MKamel7/intralogistics-amr)**, built from
+> scratch on ROS 2 Jazzy and Gazebo Harmonic: a data-sheet grounded robot, real localisation,
+> human detection and tracking, ISO 3691-4 protective fields and a VDA 5050 vehicle interface, with
+> every figure traced to a recorded measurement. It shares almost no code with this repository.
 
 Three identical `warehouse_bot` robots (white body, black wheels) in the AWS
 RoboMaker small-warehouse world, on **ROS 2 Humble + Gazebo Classic 11 + Nav2**.
