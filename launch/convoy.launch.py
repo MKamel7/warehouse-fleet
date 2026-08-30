@@ -36,7 +36,7 @@ FOLLOWERS = ['robot2', 'robot3']
 
 def generate_launch_description():
     pkg = get_package_share_directory('warehouse_bot_package')
-    nav2 = get_package_share_directory('nav2_bringup')
+    get_package_share_directory('nav2_bringup')   # fail early if nav2 is not installed
     launch_dir = os.path.join(pkg, 'launch')
 
     map_yaml = os.path.join(pkg, 'maps', 'warehouse_map.yaml')

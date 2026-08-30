@@ -38,8 +38,8 @@ class TaskAllocator(Node):
         self._seq = 0              # fallback id counter
 
         self.nav_clients = {r: ActionClient(self, NavigateToPose,
-                                        f'/{r}/navigate_to_pose')
-                        for r in self.robots}
+                                            f'/{r}/navigate_to_pose')
+                            for r in self.robots}
 
         self.create_subscription(String, '/fleet/status', self._status_cb, 10)
         self.create_subscription(String, '/fleet/hold', self._hold_cb, 10)
