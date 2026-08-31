@@ -16,6 +16,10 @@
 > scratch on ROS 2 Jazzy and Gazebo Harmonic: a data-sheet grounded robot, real localisation,
 > human detection and tracking, ISO 3691-4 protective fields and a VDA 5050 vehicle interface, with
 > every figure traced to a recorded measurement. It shares almost no code with this repository.
+>
+> **Roadmap: none. This repository is finished and will be archived.** Do not port it, repair
+> it, or add VDA 5050 to it: all three belong in the successor, and continuing here would split
+> effort between a Gazebo Classic and Humble stack and a much stronger Jazzy and Harmonic one.
 
 Three identical `warehouse_bot` robots (white body, black wheels) in the AWS
 RoboMaker small-warehouse world, on **ROS 2 Humble + Gazebo Classic 11 + Nav2**.
