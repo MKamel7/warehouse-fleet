@@ -45,7 +45,7 @@ def generate_launch_description():
 
     xacro_file = os.path.join(pkg, 'urdf', 'warehouse_bot.urdf.xacro')
     world = os.path.join(aws, 'worlds', 'no_roof_small_warehouse',
-                        'no_roof_small_warehouse.world')
+                         'no_roof_small_warehouse.world')
 
     use_sim_time = LaunchConfiguration('use_sim_time')
 
